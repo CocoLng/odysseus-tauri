@@ -179,8 +179,19 @@ pub fn run(is_installed: bool, is_native: bool) {
         })
         // Point the handler to the module namespace
         .invoke_handler(tauri::generate_handler![commands::installation_script])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(move |_app, _event| {
+            // Cmd+Q on macOS quits without CloseRequested, so also tear down on exit.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Exit = _event {
+                if is_native {
+                    native::stop_odysseus_native();
+                } else {
+                    close_odysseus();
+                }
+            }
+        });
 }
 
 pub mod commands {
@@ -210,6 +221,15 @@ pub mod commands {
         }
 
         if native {
+            #[cfg(target_os = "macos")]
+            if run_system_command("brew", &["--version"]).is_err() {
+                return (
+                    "Homebrew is required for the native install on macOS. Install it from https://brew.sh and retry."
+                        .to_string(),
+                    false,
+                );
+            }
+
             if let Err(e) = crate::native::find_python_command() {
                 return (e, false);
             }
@@ -277,6 +297,18 @@ pub mod commands {
                         false,
                     )
                 }
+            }
+
+            // AirPlay Receiver holds port 7000 on macOS, so use 7860 like start-macos.sh.
+            #[cfg(target_os = "macos")]
+            if let Err(e) = std::fs::read_to_string(&env_path).and_then(|env| {
+                let env = env.replace("\nAPP_PORT=7000\n", "\nAPP_PORT=7860\n");
+                std::fs::write(&env_path, env)
+            }) {
+                return (
+                    format!("Could not set the macOS port in the Odysseus environment file: {e}"),
+                    false,
+                );
             }
         }
 
