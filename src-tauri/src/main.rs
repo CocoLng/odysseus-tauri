@@ -3,6 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    // Finder/Dock launches only get launchd's PATH; same prefix as build-macos-app.sh.
+    #[cfg(target_os = "macos")]
+    {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{path}");
+        std::env::set_var("PATH", path);
+    }
+
     let (is_installed, is_native) = check_installation_state(check_os());
     println!("{}", is_installed);
     odysseus_lib::run(is_installed, is_native);

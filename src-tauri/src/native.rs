@@ -138,6 +138,7 @@ fn spawn_launcher(target_dir: &Path) -> Result<Child, String> {
         .arg(&script)
         .env("ODYSSEUS_PORT", PORT.as_str())
         .env("ODYSSEUS_HOST", "127.0.0.1")
+        .env("ODYSSEUS_NO_OPEN", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     new_process_group(&mut command);
