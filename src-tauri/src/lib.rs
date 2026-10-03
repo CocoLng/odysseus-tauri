@@ -169,9 +169,9 @@ pub fn run(is_installed: bool, is_native: bool) {
                     "User clicked X on window: {}. Shutting down...",
                     window.label()
                 );
-                if is_native {
-                    native::stop_odysseus_native();
-                } else {
+                // is_native is read at startup, so it is still false right after a native install.
+                native::stop_odysseus_native();
+                if !is_native {
                     close_odysseus();
                 }
                 println!("Teardown complete. Goodbye!");
@@ -186,9 +186,8 @@ pub fn run(is_installed: bool, is_native: bool) {
             // Cmd+Q on macOS quits without CloseRequested, so also tear down on exit.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Exit = _event {
-                if is_native {
-                    native::stop_odysseus_native();
-                } else {
+                native::stop_odysseus_native();
+                if !is_native {
                     close_odysseus();
                 }
             }
