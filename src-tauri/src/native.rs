@@ -242,7 +242,7 @@ pub fn run_odysseus_native() -> Result<(), String> {
     // Actively wait for the server to spin up (handling first-run pip installs)
     println!("Waiting for Odysseus server to start up (this may take a minute on first run)...");
     let start_time = std::time::Instant::now();
-    let timeout = Duration::from_secs(180); // 3 minutes timeout for dependency installation
+    let timeout = crate::BACKEND_STARTUP_TIMEOUT;
 
     loop {
         // Try connecting to the local port every 1 second

@@ -55,6 +55,16 @@ pub fn run(is_installed: bool, is_native: bool) {
                 )
             };
 
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let html = {
+                let checkbox = r#"id="native-install-checkbox""#;
+                if html.contains(checkbox) && run_system_command("brew", &["--version"]).is_ok() {
+                    html.replace(checkbox, &format!("{checkbox} checked"))
+                } else {
+                    html
+                }
+            };
+
             tauri::http::Response::builder()
                 .status(200)
                 .header("Content-Type", "text/html; charset=utf-8")
@@ -224,7 +234,7 @@ pub mod commands {
             #[cfg(target_os = "macos")]
             if run_system_command("brew", &["--version"]).is_err() {
                 return (
-                    "Homebrew is required for the native install on macOS. Install it from https://brew.sh and retry."
+                    "The native install needs Homebrew, a free tool from https://brew.sh. Install it, then click Install again, or uncheck \"Install natively\" to use Docker Desktop instead."
                         .to_string(),
                     false,
                 );
