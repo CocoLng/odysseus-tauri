@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::env;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::LazyLock;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{Manager, Url};
@@ -284,13 +285,13 @@ pub mod commands {
                     let _ = std::fs::write(installer_marker(&target_dir), "");
                 }
                 Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
                     return (
-                        format!(
-                            "Failed to clone repository: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ),
+                        explain_failure(stderr.lines()).unwrap_or_else(|| {
+                            format!("Failed to clone repository: {}", stderr.trim())
+                        }),
                         false,
-                    )
+                    );
                 }
                 Err(e) => return (format!("Failed to execute git clone: {e}"), false),
             }
@@ -325,19 +326,28 @@ pub mod commands {
         if native {
             println!("Native install: skipping Docker build/up entirely.");
         } else {
+            // Piped only to explain failures, Windows keeps docker's output as before.
+            #[cfg(target_os = "windows")]
+            let docker_output = Stdio::inherit;
+            #[cfg(not(target_os = "windows"))]
+            let docker_output = Stdio::piped;
+
             println!("Building Odysseus with optional extras (this will take a while)...");
             let build_status = Command::new("docker")
                 .current_dir(&target_dir)
                 .args(["compose", "build", "--build-arg", "INSTALL_OPTIONAL=true"])
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status();
+                .stdout(docker_output())
+                .stderr(docker_output())
+                .spawn()
+                .and_then(wait_with_logged_output);
 
             match build_status {
-                Ok(status) if status.success() => println!("Build successful!"),
-                Ok(status) => {
+                Ok((status, _)) if status.success() => println!("Build successful!"),
+                Ok((status, output)) => {
                     return (
-                        format!("Docker build failed with status: {}", status),
+                        explain_failure(output.lines()).unwrap_or_else(|| {
+                            format!("Docker build failed with status: {}", status)
+                        }),
                         false,
                     )
                 }
@@ -348,17 +358,20 @@ pub mod commands {
             let up_status = Command::new("docker")
                 .current_dir(&target_dir)
                 .args(["compose", "up", "-d", "--build"])
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .status();
+                .stdout(docker_output())
+                .stderr(docker_output())
+                .spawn()
+                .and_then(wait_with_logged_output);
 
             match up_status {
-                Ok(status) if status.success() => {
+                Ok((status, _)) if status.success() => {
                     println!("Docker compose up executed successfully!")
                 }
-                Ok(status) => {
+                Ok((status, output)) => {
                     return (
-                        format!("Docker compose up failed with status: {}", status),
+                        explain_failure(output.lines()).unwrap_or_else(|| {
+                            format!("Docker compose up failed with status: {}", status)
+                        }),
                         false,
                     )
                 }
@@ -391,7 +404,7 @@ pub mod commands {
             match native::run_odysseus_native() {
                 Ok(_) => println!("Native Odysseus process exited cleanly."),
                 Err(e) => {
-                    return (format!("Native Odysseus execution failed: {e}"), false);
+                    return (e, false);
                 }
             }
         }
@@ -539,5 +552,121 @@ pub(crate) fn run_system_command(cmd: &str, args: &[&str]) -> Result<String, Str
             output.status.code(),
             error_message
         ))
+    }
+}
+
+pub(crate) type OutputTail = Arc<Mutex<VecDeque<String>>>;
+
+pub(crate) fn wait_with_logged_output(mut child: Child) -> std::io::Result<(ExitStatus, String)> {
+    let tail = OutputTail::default();
+    let readers = [
+        forward_lines(child.stdout.take(), std::io::stdout(), &tail),
+        forward_lines(child.stderr.take(), std::io::stderr(), &tail),
+    ];
+    for reader in readers.into_iter().flatten() {
+        let _ = reader.join();
+    }
+    let lines: Vec<String> = tail.lock().unwrap().drain(..).collect();
+    Ok((child.wait()?, lines.join("\n")))
+}
+
+pub(crate) fn forward_lines(
+    input: Option<impl Read + Send + 'static>,
+    mut console: impl Write + Send + 'static,
+    tail: &OutputTail,
+) -> Option<thread::JoinHandle<()>> {
+    let input = input?;
+    let tail = tail.clone();
+    Some(thread::spawn(move || {
+        for line in BufReader::new(input).split(b'\n').map_while(Result::ok) {
+            let line = String::from_utf8_lossy(&line).trim_end().to_string();
+            let _ = writeln!(console, "{line}");
+            let mut tail = tail.lock().unwrap();
+            if tail.len() == 100 {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    }))
+}
+
+const NETWORK_ERRORS: [&str; 10] = [
+    "unable to connect",
+    "failed to fetch",
+    "temporary failure resolving",
+    "could not resolve",
+    "failed to connect to",
+    "after connection broken by",
+    "failed to do request",
+    "dial tcp",
+    "i/o timeout",
+    "tls handshake timeout",
+];
+
+const NETWORK_PROBLEM: &str = "Odysseus could not download the files it needs. Check your internet connection (and pause any VPN or ad blocker), then click Install again.";
+const DISK_FULL: &str = "There is not enough free disk space to install Odysseus. Free up some space, then click Install again.";
+
+pub(crate) fn explain_failure<'a>(
+    lines: impl DoubleEndedIterator<Item = &'a str>,
+) -> Option<String> {
+    for line in lines.rev() {
+        let lower = line.to_lowercase();
+        if lower.contains("no space left on device") {
+            return Some(DISK_FULL.to_string());
+        }
+        if NETWORK_ERRORS.iter().any(|error| lower.contains(error)) {
+            return Some(NETWORK_PROBLEM.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{explain_failure, DISK_FULL, NETWORK_PROBLEM};
+
+    const NETWORK_LINES: [&str; 9] = [
+        "#8 481.6 E: Failed to fetch http://deb.debian.org/debian/pool/main/t/tmux/tmux_3.5a-3_arm64.deb  Unable to connect to deb.debian.org:http: [IP: 140.248.138.132 80]",
+        "W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Temporary failure resolving 'deb.debian.org'",
+        "fatal: unable to access 'https://github.invalid/odysseus-dev/odysseus.git/': Could not resolve host: github.invalid",
+        "fatal: unable to access 'https://127.0.0.1:9/odysseus-dev/odysseus.git/': Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server",
+        r#"#6 0.850 WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NameResolutionError("HTTPSConnection(host='pypi.org', port=443): Failed to resolve 'pypi.org' ([Errno -3] Temporary failure in name resolution)")': /simple/requests/"#,
+        r#"WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError("HTTPSConnection(host='127.0.0.1', port=9): Failed to establish a new connection: [Errno 61] Connection refused")': /simple/requests/"#,
+        r#"Error response from daemon: failed to resolve reference "registry.invalid/odysseus/probe:latest": failed to do request: Head "https://registry.invalid/v2/odysseus/probe/manifests/latest": dialing registry.invalid:443 container via direct connection because Docker Desktop has no HTTPS proxy: connecting to registry.invalid:443: dial tcp: lookup registry.invalid: no such host"#,
+        r#"Error response from daemon: failed to resolve reference "10.255.255.1/odysseus/probe:latest": failed to do request: Head "https://10.255.255.1/v2/odysseus/probe/manifests/latest": context deadline exceeded"#,
+        r#"Error response from daemon: failed to resolve reference "host.docker.internal:9999/odysseus/probe:latest": failed to do request: Head "https://host.docker.internal:9999/v2/odysseus/probe/manifests/latest": EOF"#,
+    ];
+
+    #[test]
+    fn explains_network_errors() {
+        for line in NETWORK_LINES {
+            assert_eq!(
+                explain_failure(line.lines()).as_deref(),
+                Some(NETWORK_PROBLEM),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn explains_a_failed_docker_build() {
+        let output = "#8 481.6 E: Failed to fetch http://deb.debian.org/debian/pool/main/n/npm/npm_9.2.0%7eds1-3_all.deb  Unable to connect to deb.debian.org:http: [IP: 140.248.138.132 80]\n\
+            481.6 E: Failed to fetch http://deb.debian.org/debian/pool/main/t/tmux/tmux_3.5a-3_arm64.deb  Unable to connect to deb.debian.org:http: [IP: 140.248.138.132 80]\n\
+            481.6 E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?\n\
+            failed to solve: process \"/bin/sh -c apt-get update && apt-get install -y --no-install-recommends tmux\" did not complete successfully: exit code: 100";
+        assert_eq!(
+            explain_failure(output.lines()).as_deref(),
+            Some(NETWORK_PROBLEM)
+        );
+    }
+
+    #[test]
+    fn explains_a_full_disk_and_nothing_else() {
+        let disk = explain_failure(
+            "head: error writing 'standard output': No space left on device".lines(),
+        );
+        assert_eq!(disk.as_deref(), Some(DISK_FULL));
+        let other = "ERROR: No matching distribution found for requests\nfailed to solve: process \"/bin/sh -c pip install -r requirements.txt\" did not complete successfully: exit code: 1";
+        assert_eq!(explain_failure(other.lines()), None);
     }
 }
