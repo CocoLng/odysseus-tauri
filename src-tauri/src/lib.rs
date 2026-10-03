@@ -250,40 +250,50 @@ pub mod commands {
         let target_dir = get_odysseus_dir();
 
         if target_dir.exists() {
-            return (
-                format!(
-                    "Installation directory already exists: {}. Refusing to install over it.",
-                    target_dir.display()
-                ),
-                false,
-            );
-        }
-
-        let clone_result = Command::new("git")
-            .args([
-                "clone",
-                "https://github.com/bitboody/odysseus.git",
-                "--branch",
-                "tauri",
-            ])
-            .arg(&target_dir)
-            .output();
-
-        match clone_result {
-            Ok(output) if output.status.success() => println!(
-                "Git repository cloned successfully: {}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            ),
-            Ok(output) => {
+            if !installer_marker(&target_dir).is_file() {
                 return (
                     format!(
-                        "Failed to clone repository: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
+                        "There is already an Odysseus folder at {}, and Odysseus will not overwrite it. Move or rename it, then click Install again.",
+                        target_dir.display()
                     ),
                     false,
-                )
+                );
             }
-            Err(e) => return (format!("Failed to execute git clone: {e}"), false),
+            println!(
+                "Resuming the unfinished installation in {}",
+                target_dir.display()
+            );
+            native::stop_odysseus_native();
+        } else {
+            let clone_result = Command::new("git")
+                .args([
+                    "clone",
+                    "https://github.com/bitboody/odysseus.git",
+                    "--branch",
+                    "tauri",
+                ])
+                .arg(&target_dir)
+                .output();
+
+            match clone_result {
+                Ok(output) if output.status.success() => {
+                    println!(
+                        "Git repository cloned successfully: {}",
+                        String::from_utf8_lossy(&output.stdout).trim()
+                    );
+                    let _ = std::fs::write(installer_marker(&target_dir), "");
+                }
+                Ok(output) => {
+                    return (
+                        format!(
+                            "Failed to clone repository: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                        false,
+                    )
+                }
+                Err(e) => return (format!("Failed to execute git clone: {e}"), false),
+            }
         }
 
         let env_example_path = target_dir.join(".env.example-desktop");
@@ -507,6 +517,10 @@ fn get_odysseus_dir() -> PathBuf {
 
 fn get_config_dir() -> PathBuf {
     get_documents_dir().join("Odysseus Desktop")
+}
+
+fn installer_marker(dir: &std::path::Path) -> PathBuf {
+    dir.join(".git").join("odysseus-installer")
 }
 
 pub(crate) fn run_system_command(cmd: &str, args: &[&str]) -> Result<String, String> {

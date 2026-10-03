@@ -153,8 +153,9 @@ fn spawn_launcher(target_dir: &Path) -> Result<Child, String> {
 #[cfg(target_os = "linux")]
 fn spawn_launcher(target_dir: &Path) -> Result<Child, String> {
     let venv_python = venv_python_path(target_dir);
+    let setup_done = target_dir.join("venv").join(".setup_done");
 
-    if !venv_python.exists() {
+    if !setup_done.exists() {
         let python = find_python_command()?;
 
         let status = Command::new(python)
@@ -189,6 +190,7 @@ fn spawn_launcher(target_dir: &Path) -> Result<Child, String> {
         if !setup_status.success() {
             return Err(format!("setup.py failed: {setup_status}"));
         }
+        let _ = std::fs::write(&setup_done, "");
     }
 
     let mut command = Command::new(&venv_python);
