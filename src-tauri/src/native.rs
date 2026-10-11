@@ -160,14 +160,22 @@ fn spawn_launcher(target_dir: &Path) -> Result<Child, String> {
     if !setup_done.exists() {
         let python = find_python_command()?;
 
-        let status = Command::new(python)
+        let (status, output) = Command::new(python)
             .current_dir(target_dir)
             .args(["-m", "venv", "venv"])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(crate::wait_with_logged_output)
             .map_err(|e| format!("Failed to execute '{python} -m venv venv': {e}"))?;
         if !status.success() {
+            // Debian and Ubuntu leave ensurepip out until python3-venv is installed.
+            if output.contains("ensurepip is not") {
+                return Err(
+                    "Odysseus needs the python3-venv package. Run `sudo apt install python3-venv` in a terminal, then click Install again."
+                        .to_string(),
+                );
+            }
             return Err(format!("Failed to create virtual environment: {status}"));
         }
 
