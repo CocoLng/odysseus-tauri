@@ -28,6 +28,29 @@ fn status_url(page: &str) -> Url {
     Url::parse(&format!("{prefix}{page}")).expect("status page URL must be valid")
 }
 
+// The app's own pages: the custom status-page protocol (and its Windows
+// `http://odysseus.localhost` alias) plus the local backend server. Anything
+// else is an external link that should open in the user's system browser
+// instead of navigating inside (or popping a new copy of) the app webview.
+fn is_internal_url(url: &Url) -> bool {
+    match url.scheme() {
+        "odysseus" | "tauri" => true,
+        "http" => matches!(
+            url.host_str(),
+            Some(host) if host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
+        ),
+        _ => false,
+    }
+}
+
+fn open_in_system_browser(url: &Url) {
+    if matches!(url.scheme(), "http" | "https" | "mailto") {
+        if let Err(error) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
+            println!("Failed to open external link {url}: {error}");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(is_installed: bool, is_native: bool) {
     tauri::Builder::default()
@@ -74,7 +97,24 @@ pub fn run(is_installed: bool, is_native: bool) {
         })
         .setup(move |app| {
             let app_handle = app.handle().clone();
-            let window = app_handle.get_webview_window("main").unwrap();
+            let window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+                .title("Odysseus")
+                .inner_size(1280.0, 800.0)
+                .decorations(true)
+                .transparent(false)
+                .on_navigation(|url| {
+                    if is_internal_url(url) {
+                        true
+                    } else {
+                        open_in_system_browser(url);
+                        false
+                    }
+                })
+                .on_new_window(|url, _features| {
+                    open_in_system_browser(&url);
+                    tauri::webview::NewWindowResponse::Deny
+                })
+                .build()?;
 
             let initial_page = if is_installed { "loading" } else { "installer" };
             let _ = window.navigate(status_url(initial_page));
@@ -188,7 +228,7 @@ pub fn run(is_installed: bool, is_native: bool) {
             }
             _ => {}
         })
-        // Point the handler to the module namespace
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![commands::installation_script])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
