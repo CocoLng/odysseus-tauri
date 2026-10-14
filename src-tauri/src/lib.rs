@@ -495,32 +495,24 @@ fn ensure_docker_is_running() -> Result<(), String> {
 fn run_odysseus() -> Result<(), String> {
     ensure_docker_is_running()?;
 
-    match run_system_command("docker", &["ps"]) {
-        Ok(output) => {
-            if output.contains("odysseus") {
-                println!("Odysseus is already running.");
-            } else {
-                println!("Starting Odysseus...");
-                let target_dir = get_odysseus_dir();
+    // Run it even if containers are up: chromadb or searxng can run without the app.
+    println!("Starting Odysseus...");
+    let target_dir = get_odysseus_dir();
 
-                let result = Command::new("docker")
-                    .current_dir(&target_dir)
-                    .args(["compose", "up", "-d"])
-                    .output();
+    let result = Command::new("docker")
+        .current_dir(&target_dir)
+        .args(["compose", "up", "-d"])
+        .output();
 
-                match result {
-                    Ok(out) if out.status.success() => println!("Odysseus started successfully."),
-                    Ok(out) => {
-                        return Err(format!(
-                            "Failed to start Odysseus: {}",
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        ))
-                    }
-                    Err(e) => return Err(format!("Failed to execute docker command: {e}")),
-                }
-            }
+    match result {
+        Ok(out) if out.status.success() => println!("Odysseus started successfully."),
+        Ok(out) => {
+            return Err(format!(
+                "Failed to start Odysseus: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
         }
-        Err(e) => return Err(format!("Could not inspect Docker containers: {e}")),
+        Err(e) => return Err(format!("Failed to execute docker command: {e}")),
     }
 
     Ok(())
