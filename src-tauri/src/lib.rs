@@ -406,7 +406,7 @@ pub mod commands {
             println!("Starting Odysseus containers...");
             let up_status = Command::new("docker")
                 .current_dir(&target_dir)
-                .args(["compose", "up", "-d", "--build"])
+                .args(["compose", "up", "-d"])
                 .stdout(docker_output())
                 .stderr(docker_output())
                 .spawn()
